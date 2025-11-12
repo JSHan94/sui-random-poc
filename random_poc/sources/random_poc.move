@@ -23,6 +23,8 @@ public struct Lottery has key {
   slots: vector<bool>,
   winner: option::Option<address>,
   winning_slot: u64,
+  last_picker: option::Option<address>,
+  last_slot: u64,
   prize: Balance<SUI>,
   remaining_fee: Balance<SUI>
 }
@@ -52,6 +54,8 @@ public fun create_lottery(payment: Coin<SUI>, ctx: &mut tx_context::TxContext) {
     slots: make_empty_vec(SLOT_COUNT),
     winner: option::none(),
     winning_slot: 0,
+    last_picker: option::none(),
+    last_slot: 0,
     prize: coin::into_balance(payment),
     remaining_fee: balance::zero()
   };
@@ -120,9 +124,14 @@ entry fun pick_slot(slot_index: u64, lottery:&mut Lottery, r: &Random, payment: 
     won = random_number < winning_number;
   };
 
+  let sender = tx_context::sender(ctx);
   if (won) {
-    lottery.winner = option::some(tx_context::sender(ctx));
+    lottery.winner = option::some(sender);
     lottery.winning_slot = slot_index;
+  } else {
+    // Update last_picker and last_slot when not winning to keep gas costs consistent
+    lottery.last_picker = option::some(sender);
+    lottery.last_slot = slot_index;
   };
 
   event::emit(PickedEvent {
@@ -196,4 +205,12 @@ public fun get_prize(lottery: &Lottery): u64 {
 
 public fun get_remaining_fee(lottery: &Lottery): u64 {
   balance::value(&lottery.remaining_fee)
+}
+
+public fun get_last_picker(lottery: &Lottery): option::Option<address> {
+  lottery.last_picker
+}
+
+public fun get_last_slot(lottery: &Lottery): u64 {
+  lottery.last_slot
 }
