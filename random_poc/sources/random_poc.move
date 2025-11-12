@@ -3,21 +3,35 @@ module random_poc::random_poc;
 use sui::event;
 use sui::random::{Random};
 use sui::random::new_generator;
+use sui::coin::{Self, Coin};
+use sui::sui::SUI;
+use sui::balance::{Self, Balance};
 
 const ENotActiveLottery: u64 = 1;
 const EInvalidSlot: u64 = 2;
+const EInsufficientPayment: u64 = 3;
+const ENotCreator: u64 = 4;
+const ENotWinner: u64 = 5;
+const ENoWinner: u64 = 6;
 const SLOT_COUNT: u64 = 9;
+const LOTTERY_PRIZE: u64 = 100_000_000; // 0.1 SUI in MIST (1 SUI = 1,000,000,000 MIST)
+const FEE: u64 = 15_000_000; // 0.015 SUI in MIST
 
 public struct Lottery has key {
   id: UID,
+  creator: address,
   slots: vector<bool>,
-  is_active: bool,
+  winner: option::Option<address>,
   winning_slot: u64,
+  prize: Balance<SUI>,
+  remaining_fee: Balance<SUI>
 }
 
 public struct LotteryCreatedEvent has copy, drop, store {
   lottery_id: ID,
+  creator: address,
   slot_count: u64,
+  prize: u64
 }
 
 public struct PickedEvent has copy, drop, store {
@@ -27,17 +41,26 @@ public struct PickedEvent has copy, drop, store {
   random_number: u64,
 }
 
-public fun create_lottery(ctx: &mut tx_context::TxContext) {
+public fun create_lottery(payment: Coin<SUI>, ctx: &mut tx_context::TxContext) {
+  // Verify payment
+  assert!(coin::value(&payment) == LOTTERY_PRIZE, EInsufficientPayment);
+
+  let creator = tx_context::sender(ctx);
   let lottery = Lottery {
     id: sui::object::new(ctx),
+    creator,
     slots: make_empty_vec(SLOT_COUNT),
-    is_active: true,
-    winning_slot: 0
+    winner: option::none(),
+    winning_slot: 0,
+    prize: coin::into_balance(payment),
+    remaining_fee: balance::zero()
   };
 
   event::emit(LotteryCreatedEvent {
     lottery_id: object::id(&lottery),
+    creator,
     slot_count: SLOT_COUNT,
+    prize: LOTTERY_PRIZE
   });
 
   transfer::share_object(lottery);
@@ -68,9 +91,13 @@ fun count_unpicked_slots(slots: &vector<bool>): u64 {
     count
 }
 
-entry fun pick_slot(slot_index: u64, lottery:&mut Lottery, r: &Random, ctx: &mut tx_context::TxContext):u64 {
-  assert!(lottery.is_active, ENotActiveLottery);
+entry fun pick_slot(slot_index: u64, lottery:&mut Lottery, r: &Random, payment: Coin<SUI>, ctx: &mut tx_context::TxContext):u64 {
+  assert!(option::is_none(&lottery.winner), ENotActiveLottery);
   assert!(lottery.slots[slot_index] == false, EInvalidSlot);
+  assert!(coin::value(&payment) == FEE, EInsufficientPayment);
+
+  // Collect the fee
+  balance::join(&mut lottery.remaining_fee, coin::into_balance(payment));
 
   let slot = vector::borrow_mut(&mut lottery.slots, slot_index);
   * slot = true;
@@ -94,7 +121,7 @@ entry fun pick_slot(slot_index: u64, lottery:&mut Lottery, r: &Random, ctx: &mut
   };
 
   if (won) {
-    lottery.is_active = false;
+    lottery.winner = option::some(tx_context::sender(ctx));
     lottery.winning_slot = slot_index;
   };
 
@@ -108,9 +135,39 @@ entry fun pick_slot(slot_index: u64, lottery:&mut Lottery, r: &Random, ctx: &mut
   random_number
 }
 
+public fun collect_fee(lottery: &mut Lottery, ctx: &mut tx_context::TxContext) {
+  // Only creator can collect fees
+  assert!(tx_context::sender(ctx) == lottery.creator, ENotCreator);
+
+  let fee_amount = balance::value(&lottery.remaining_fee);
+  if (fee_amount > 0) {
+    let fee_coin = coin::from_balance(balance::split(&mut lottery.remaining_fee, fee_amount), ctx);
+    transfer::public_transfer(fee_coin, lottery.creator);
+  };
+}
+
+public fun collect_prize(lottery: &mut Lottery, ctx: &mut tx_context::TxContext) {
+  // Must have a winner
+  assert!(option::is_some(&lottery.winner), ENoWinner);
+
+  // Only winner can collect prize
+  let winner_addr = *option::borrow(&lottery.winner);
+  assert!(tx_context::sender(ctx) == winner_addr, ENotWinner);
+
+  let prize_amount = balance::value(&lottery.prize);
+  if (prize_amount > 0) {
+    let prize_coin = coin::from_balance(balance::split(&mut lottery.prize, prize_amount), ctx);
+    transfer::public_transfer(prize_coin, winner_addr);
+  };
+}
+
 // Public accessor functions for testing
 public fun is_active(lottery: &Lottery): bool {
-  lottery.is_active
+  option::is_none(&lottery.winner)
+}
+
+public fun get_winner(lottery: &Lottery): option::Option<address> {
+  lottery.winner
 }
 
 public fun get_slot(lottery: &Lottery, index: u64): bool {
@@ -127,4 +184,16 @@ public fun get_winning_slot(lottery: &Lottery): u64 {
 
 public fun slot_count(): u64 {
   SLOT_COUNT
+}
+
+public fun get_creator(lottery: &Lottery): address {
+  lottery.creator
+}
+
+public fun get_prize(lottery: &Lottery): u64 {
+  balance::value(&lottery.prize)
+}
+
+public fun get_remaining_fee(lottery: &Lottery): u64 {
+  balance::value(&lottery.remaining_fee)
 }
