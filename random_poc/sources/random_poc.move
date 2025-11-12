@@ -22,6 +22,7 @@ public struct PickedEvent has copy, drop, store {
   lottery_id: ID,
   slot_index: u64,
   won: bool,
+  random_number: u64,
 }
 
 public fun create_lottery(max_slot: u64, ctx: &mut tx_context::TxContext) {
@@ -65,7 +66,7 @@ fun count_unpicked_slots(slots: &vector<bool>): u64 {
     count
 }
 
-entry fun pick_slot(slot_index: u64, lottery:&mut Lottery, r: &Random, ctx: &mut tx_context::TxContext) {
+entry fun pick_slot(slot_index: u64, lottery:&mut Lottery, r: &Random, ctx: &mut tx_context::TxContext):u64 {
   assert!(lottery.is_active, ENotActiveLottery);
   assert!(lottery.slots[slot_index] == false, EInvalidSlot);
 
@@ -75,14 +76,19 @@ entry fun pick_slot(slot_index: u64, lottery:&mut Lottery, r: &Random, ctx: &mut
   // Count remaining unpicked slots
   let remaining_slots = count_unpicked_slots(&lottery.slots);
 
+  // Generate random number and determine if won
+  let random_number: u64;
+  let won: bool;
+
   // If this is the last slot, winner is guaranteed
-  let won = if (remaining_slots == 0) {
-    true
+  if (remaining_slots == 0) {
+    won = true;
+    random_number = 0; // No random number needed for guaranteed win
   } else {
     let winning_number = 10000 / lottery.slots.length();
     let mut generator = new_generator(r, ctx);
-    let random_number = generator.generate_u64_in_range(0,10000);
-    random_number < winning_number
+    random_number = generator.generate_u64_in_range(0,10000);
+    won = random_number < winning_number;
   };
 
   if (won) {
@@ -94,7 +100,10 @@ entry fun pick_slot(slot_index: u64, lottery:&mut Lottery, r: &Random, ctx: &mut
     lottery_id: object::id(lottery),
     slot_index,
     won,
+    random_number,
   });
+
+  random_number
 }
 
 // Public accessor functions for testing

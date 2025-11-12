@@ -3,6 +3,7 @@ module random_poc::tests {
     use random_poc::random_poc;
     use sui::random::{Self, Random};
     use sui::test_scenario::{Self as ts};
+    use sui::test_utils::{Self};
 
     const ADMIN: address = @0xAD;
 
@@ -303,6 +304,61 @@ module random_poc::tests {
             assert!(random_poc::is_active(&lottery) == false, 2);
             // Winning slot should be 4
             assert!(random_poc::get_winning_slot(&lottery) == 4, 3);
+
+            ts::return_shared(lottery);
+            ts::return_shared(r);
+        };
+        ts::end(scenario);
+    }
+
+    #[test]
+    fun test_events_with_random_numbers() {
+        use std::debug;
+
+        let mut scenario = ts::begin(@0x0);
+
+        random::create_for_testing(ts::ctx(&mut scenario));
+        ts::next_tx(&mut scenario, ADMIN);
+
+        // Create lottery with 10 slots
+        {
+            random_poc::create_lottery(10, ts::ctx(&mut scenario));
+        };
+        ts::next_tx(&mut scenario, ADMIN);
+
+        {
+            let mut lottery = ts::take_shared<random_poc::Lottery>(&scenario);
+            let r = ts::take_shared<Random>(&scenario);
+
+            // Log winning threshold for reference
+            test_utils::print(b"Winning threshold (10000/10):");
+            debug::print(&1000);
+            test_utils::print(b"");
+
+            // Pick all 10 slots and log the random numbers
+            let mut i = 0;
+            while (i < 10) {
+                test_utils::print(b"=== Picking slot ===");
+                debug::print(&i);
+
+                let random_num = random_poc::pick_slot(i, &mut lottery, &r, ts::ctx(&mut scenario));
+
+                test_utils::print(b"Random number:");
+                debug::print(&random_num);
+
+                test_utils::print(b"Won:");
+                debug::print(&!random_poc::is_active(&lottery));
+                test_utils::print(b"");
+
+                i = i + 1;
+            };
+
+            // Verify all attempted slots were picked
+            let mut j = 0;
+            while (j < i) {
+                assert!(random_poc::get_slot(&lottery, j) == true, j);
+                j = j + 1;
+            };
 
             ts::return_shared(lottery);
             ts::return_shared(r);
