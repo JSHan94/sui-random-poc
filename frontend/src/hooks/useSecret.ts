@@ -1,249 +1,127 @@
 import { useState, useEffect } from "react"
-import { useSignAndExecuteTransaction, useSuiClient } from "@mysten/dapp-kit"
-import { keccak256 as keccakHash } from "js-sha3"
-import { walrus, WalrusFile } from "@mysten/walrus"
 
-// Helper function to generate random bytes
-const generateRandomBytes = (length: number): Uint8Array => {
-	const bytes = new Uint8Array(length)
+// Helper function to generate random 31-bit number
+// We use 31 bits (not 64) to ensure secret^2 + nullifier^2 fits in u64
+// This avoids overflow issues in the ZK circuit
+const generateRandomU31 = (): bigint => {
+	// Generate 4 random bytes (32 bits)
+	const bytes = new Uint8Array(4)
 	crypto.getRandomValues(bytes)
-	return bytes
-}
-
-// Helper function to convert bytes to hex string
-const bytesToHex = (bytes: Uint8Array): string => {
-	return Array.from(bytes)
-		.map((b) => b.toString(16).padStart(2, "0"))
-		.join("")
-}
-
-// Helper function to compute Keccak256 hash
-export const keccak256 = (data: Uint8Array): Uint8Array => {
-	const hashHex = keccakHash(data)
-	const hashBytes = new Uint8Array(hashHex.length / 2)
-	for (let i = 0; i < hashBytes.length; i++) {
-		hashBytes[i] = parseInt(hashHex.substring(i * 2, i * 2 + 2), 16)
+	// Convert to bigint
+	let result = 0n
+	for (let i = 0; i < 4; i++) {
+		result = (result << 8n) | BigInt(bytes[i])
 	}
-	return hashBytes
+	// Mask to 31 bits (max value: 2^31 - 1 = 2147483647)
+	return result & ((1n << 31n) - 1n)
 }
 
-export const useSecret = (currentAccountAddress: string | undefined) => {
-	const suiClient = useSuiClient()
-	const { mutate: signAndExecute } = useSignAndExecuteTransaction()
-	const client = suiClient.$extend(walrus({ network: "testnet" }))
+// Helper to compute commitment = secret^2 + nullifier^2
+// No modulo operation - circuit computes in the field
+const computeCommitment = (secret: bigint, nullifier: bigint): bigint => {
+	const secretSquared = secret * secret
+	const nullifierSquared = nullifier * nullifier
+	return secretSquared + nullifierSquared
+}
 
-	const [claimSecretHash, setClaimSecretHash] = useState<string>("")
-	const [walrusBlobId, setWalrusBlobId] = useState<string>("")
-	const [generatedSecret, setGeneratedSecret] = useState<string>("")
+export const useSecret = () => {
+	const [commitment, setCommitment] = useState<string>("") // Stores the commitment value
+	const [walrusBlobId, setWalrusBlobId] = useState<string>("") // Kept for compatibility but not used
+	const [generatedSecret, setGeneratedSecret] = useState<string>("") // Format: "secret,nullifier"
 	const [isGeneratingSecret, setIsGeneratingSecret] = useState<boolean>(false)
 	const [isRetrievingSecret, setIsRetrievingSecret] = useState<boolean>(false)
 	const [status, setStatus] = useState<string>("")
 
 	// Load secret from localStorage on mount
 	useEffect(() => {
-		const storedHash = localStorage.getItem("lotterySecretHash")
-		const storedBlobId = localStorage.getItem("lotteryWalrusBlobId")
+		const storedCommitment = localStorage.getItem("lotteryCommitment")
 		const storedSecret = localStorage.getItem("lotterySecret")
 
-		if (storedHash) setClaimSecretHash(storedHash)
-		if (storedBlobId) setWalrusBlobId(storedBlobId)
+		if (storedCommitment) setCommitment(storedCommitment)
 		if (storedSecret) setGeneratedSecret(storedSecret)
 	}, [])
 
 	const handleGenerateAndUploadSecret = async () => {
-		if (!currentAccountAddress) {
-			setStatus("Please connect your wallet first")
-			return
-		}
-
 		setIsGeneratingSecret(true)
-		setStatus("Generating claim secret and uploading to Walrus...")
+		setStatus("Generating commitment...")
 
 		try {
-			// Generate random secret (32 bytes)
-			const secretBytes = generateRandomBytes(32)
-			const secretHex = bytesToHex(secretBytes)
+			// Generate random secret and nullifier (31-bit values)
+			const secret = generateRandomU31()
+			const nullifier = generateRandomU31()
 
-			// Compute hash of the secret
-			const hashBytes = keccak256(secretBytes)
-			const hashHex = bytesToHex(hashBytes)
+			// Compute commitment = secret^2 + nullifier^2
+			const computedCommitment = computeCommitment(secret, nullifier)
 
-			// Create a WalrusFile with the secret as text (hex string)
-			const file = WalrusFile.from({
-				contents: new TextEncoder().encode(secretHex),
-				identifier: `lottery-secret-${Date.now()}.txt`,
-				tags: {
-					"content-type": "text/plain",
-				},
-			})
+			// Store as "secret,nullifier" format
+			const secretData = `${secret.toString()},${nullifier.toString()}`
 
-			// Create upload flow
-			setStatus("Creating Walrus upload flow...")
-			const flow = client.walrus.writeFilesFlow({ files: [file] })
-			await flow.encode()
+			// Store the generated values in state and localStorage
+			setGeneratedSecret(secretData)
+			setCommitment(computedCommitment.toString())
+			setWalrusBlobId("") // Not using Walrus for now
 
-			// Step 1: Register the blob (requires wallet signature)
-			setStatus("Please sign the transaction to register blob on Walrus...")
-			const registerTx = flow.register({
-				epochs: 5,
-				owner: currentAccountAddress,
-				deletable: false,
-			})
+			// Persist to localStorage
+			localStorage.setItem("lotterySecret", secretData)
+			localStorage.setItem("lotteryCommitment", computedCommitment.toString())
 
-			await new Promise<void>((resolve, reject) => {
-				signAndExecute(
-					{ transaction: registerTx },
-					{
-						onSuccess: async (result) => {
-							console.log("Register transaction successful:", result)
-							setStatus("Uploading blob to Walrus storage nodes...")
-
-							try {
-								// Step 2: Upload the blob
-								await flow.upload({ digest: result.digest })
-
-								// Step 3: Certify (requires another wallet signature)
-								setStatus("Please sign the transaction to certify the blob...")
-								const certifyTx = flow.certify()
-
-								signAndExecute(
-									{ transaction: certifyTx },
-									{
-										onSuccess: async (certifyResult) => {
-											console.log("Certify transaction successful:", certifyResult)
-
-											// Wait for transaction and get the blob ID from events
-											const txDetails = await client.waitForTransaction({
-												digest: certifyResult.digest,
-												options: {
-													showEvents: true,
-													showObjectChanges: true,
-												},
-											})
-
-											// Extract blob ID from events
-											let blobId = ""
-											if (txDetails.events) {
-												for (const event of txDetails.events) {
-													if (event.type.includes("Blob")) {
-														const parsedJson = event.parsedJson as any
-														if (parsedJson.blob_id) {
-															const { blobIdFromInt } = await import("@mysten/walrus")
-															blobId = blobIdFromInt(parsedJson.blob_id)
-															break
-														}
-													}
-												}
-											}
-
-											if (!blobId) {
-												throw new Error("Could not extract blob ID from transaction")
-											}
-
-											console.log("Extracted Blob ID:", blobId)
-
-											// Store the generated values in state and localStorage
-											setGeneratedSecret(secretHex)
-											setClaimSecretHash(hashHex)
-											setWalrusBlobId(blobId)
-
-											// Persist to localStorage
-											localStorage.setItem("lotterySecret", secretHex)
-											localStorage.setItem("lotterySecretHash", hashHex)
-											localStorage.setItem("lotteryWalrusBlobId", blobId)
-
-											setStatus(
-												`Secret generated and uploaded!\nSecret: ${secretHex}\nHash: ${hashHex}\nWalrus Blob ID: ${blobId}\n\n✓ Secret saved! You can now use this for all lottery picks.`
-											)
-											setIsGeneratingSecret(false)
-											resolve()
-										},
-										onError: (error) => {
-											console.error("Certify transaction failed:", error)
-											setStatus(`Error certifying blob: ${error.message}`)
-											setIsGeneratingSecret(false)
-											reject(error)
-										},
-									}
-								)
-							} catch (error: any) {
-								console.error("Error uploading blob:", error)
-								setStatus(`Error uploading: ${error.message}`)
-								setIsGeneratingSecret(false)
-								reject(error)
-							}
-						},
-						onError: (error) => {
-							console.error("Register transaction failed:", error)
-							setStatus(`Error registering blob: ${error.message}`)
-							setIsGeneratingSecret(false)
-							reject(error)
-						},
-					}
-				)
-			})
+			setStatus(
+				`✅ Commitment generated!\n\nSecret: ${secret.toString()}\nNullifier: ${nullifier.toString()}\nCommitment: ${computedCommitment.toString()}\n\n💾 Saved to localStorage! You can now use this for all lottery picks.\n\n⚠️ IMPORTANT: Copy these values somewhere safe! If you lose them, you won't be able to claim prizes.`
+			)
+			setIsGeneratingSecret(false)
 		} catch (error: any) {
-			console.error("Error generating/uploading secret:", error)
+			console.error("Error generating commitment:", error)
 			setStatus(`Error: ${error.message}`)
 			setIsGeneratingSecret(false)
 		}
 	}
 
-	const handleRetrieveSecretFromWalrus = async (blobIdInput: string) => {
-		const blobId = blobIdInput.trim()
+	const handleRetrieveSecretFromWalrus = async (secretInput: string) => {
+		const secretData = secretInput.trim()
 
-		if (!blobId) {
-			setStatus("Please enter a Walrus Blob ID")
+		if (!secretData) {
+			setStatus("Please enter your secret data (format: secret,nullifier)")
 			return
 		}
 
 		setIsRetrievingSecret(true)
-		setStatus("Retrieving secret from Walrus...")
+		setStatus("Loading secret...")
 
 		try {
-			console.log("Fetching blob from Walrus, Blob ID:", blobId)
+			// Parse secret and nullifier from input (format: "secret,nullifier")
+			const [secretStr, nullifierStr] = secretData.split(',')
 
-			// Fetch the blob from Walrus and convert to file
-			const blob = await client.walrus.getBlob({ blobId })
-			console.log("Got blob:", blob)
+			if (!secretStr || !nullifierStr) {
+				throw new Error("Invalid format. Please use: secret,nullifier")
+			}
 
-			const file = await blob.asFile()
-			console.log("Converted to file:", file)
+			const secret = BigInt(secretStr.trim())
+			const nullifier = BigInt(nullifierStr.trim())
 
-			// Read the file content
-			const blobText = await file.text()
-			console.log("Retrieved secret from Walrus:", blobText)
+			// Compute commitment
+			const computedCommitment = computeCommitment(secret, nullifier)
 
-			setGeneratedSecret(blobText)
-
-			// Compute hash of the secret for use in picks
-			const secretBytes = Array.from(
-				blobText.match(/.{1,2}/g)?.map((byte) => parseInt(byte, 16)) || []
-			)
-			const hashBytes = keccak256(new Uint8Array(secretBytes))
-			const hashHex = bytesToHex(hashBytes)
-
-			setClaimSecretHash(hashHex)
-			setWalrusBlobId(blobId)
+			setGeneratedSecret(secretData)
+			setCommitment(computedCommitment.toString())
+			setWalrusBlobId("")
 
 			// Save to localStorage
-			localStorage.setItem("lotterySecret", blobText)
-			localStorage.setItem("lotterySecretHash", hashHex)
-			localStorage.setItem("lotteryWalrusBlobId", blobId)
+			localStorage.setItem("lotterySecret", secretData)
+			localStorage.setItem("lotteryCommitment", computedCommitment.toString())
 
 			setStatus(
-				`✓ Secret retrieved and saved! Length: ${blobText.length} chars\nYou can now use this secret for lottery picks.`
+				`✅ Secret loaded!\nCommitment: ${computedCommitment.toString()}\n\nYou can now use this for lottery picks.`
 			)
 		} catch (error: any) {
-			console.error("Error retrieving secret from Walrus:", error)
-			setStatus(`Error retrieving secret: ${error.message}`)
+			console.error("Error loading secret:", error)
+			setStatus(`Error: ${error.message}`)
 		} finally {
 			setIsRetrievingSecret(false)
 		}
 	}
 
 	return {
-		claimSecretHash,
+		commitment,
 		walrusBlobId,
 		generatedSecret,
 		isGeneratingSecret,

@@ -1,7 +1,8 @@
 import { FC, useState, useEffect, useCallback } from "react"
 import { useSuiClient, useCurrentAccount } from "@mysten/dapp-kit"
 import { PACKAGE_ID, LOTTERY_PRIZE, FEE, mistToSui } from "../../config/constants"
-import { SecretManagement, useSecret } from "./components/SecretManagement"
+import { SecretManagement } from "./components/SecretManagement"
+import { useSecret } from "../../hooks/useSecret"
 import { LotteryCreation } from "./components/LotteryCreation"
 import { LotteryPlay } from "./components/LotteryPlay"
 import { LotteryGrid } from "./components/LotteryGrid"
@@ -20,7 +21,15 @@ interface LotteryData {
 const LotteryInteraction: FC = () => {
 	const suiClient = useSuiClient()
 	const currentAccount = useCurrentAccount()
-	const { claimSecretHash, generatedSecret } = useSecret(currentAccount?.address)
+	const {
+		commitment,
+		generatedSecret,
+		isGeneratingSecret,
+		isRetrievingSecret,
+		status: secretStatus,
+		handleGenerateAndUploadSecret,
+		handleRetrieveSecretFromWalrus,
+	} = useSecret()
 
 	const [lotteryObjectId, setLotteryObjectId] = useState<string>("")
 	const [slotIndex, setSlotIndex] = useState<number | null>(null)
@@ -225,6 +234,13 @@ const LotteryInteraction: FC = () => {
 			<SecretManagement
 				currentAccountAddress={currentAccount?.address}
 				onStatusChange={setStatus}
+				commitment={commitment}
+				generatedSecret={generatedSecret}
+				isGeneratingSecret={isGeneratingSecret}
+				isRetrievingSecret={isRetrievingSecret}
+				status={secretStatus}
+				handleGenerateAndUploadSecret={handleGenerateAndUploadSecret}
+				handleRetrieveSecretFromWalrus={handleRetrieveSecretFromWalrus}
 			/>
 
 			{/* Create Lottery Section */}
@@ -286,7 +302,7 @@ const LotteryInteraction: FC = () => {
 					lotteryData={lotteryData}
 					slotIndex={slotIndex}
 					currentAccountAddress={currentAccount?.address}
-					claimSecretHash={claimSecretHash}
+					commitment={commitment}
 					generatedSecret={generatedSecret}
 					isLoading={isLoading}
 					onLoadingChange={setIsLoading}

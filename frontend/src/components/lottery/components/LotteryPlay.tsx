@@ -8,6 +8,7 @@ import {
 	FEE,
 	mistToSui,
 } from "../../../config/constants"
+import { generateClaimProof } from "../../../utils/zkProof"
 
 interface LotteryData {
 	slots: boolean[]
@@ -25,7 +26,7 @@ interface LotteryPlayProps {
 	lotteryData: LotteryData | null
 	slotIndex: number | null
 	currentAccountAddress: string | undefined
-	claimSecretHash: string
+	commitment: string
 	generatedSecret: string
 	isLoading: boolean
 	onLoadingChange: (loading: boolean) => void
@@ -38,7 +39,7 @@ export const LotteryPlay: FC<LotteryPlayProps> = ({
 	lotteryData,
 	slotIndex,
 	currentAccountAddress,
-	claimSecretHash,
+	commitment,
 	generatedSecret,
 	isLoading,
 	onLoadingChange,
@@ -50,9 +51,11 @@ export const LotteryPlay: FC<LotteryPlayProps> = ({
 	const [claimSecret, setClaimSecret] = useState<string>("")
 
 	const handlePickSlot = async () => {
+		console.log({ lotteryObjectId, commitment })
 		if (!lotteryObjectId || isLoading || slotIndex === null) return
 
-		if (!claimSecretHash) {
+		if (!commitment) {
+			console.log("??")
 			onStatusChange(
 				"Please generate or fetch your secret first in the 'My Secret' section above!"
 			)
@@ -67,12 +70,16 @@ export const LotteryPlay: FC<LotteryPlayProps> = ({
 
 			const [coin] = tx.splitCoins(tx.gas, [FEE])
 
-			// Convert secret hash to byte array
-			const secretHashBytes = Array.from(
-				claimSecretHash
-					.match(/.{1,2}/g)
-					?.map((byte) => parseInt(byte, 16)) || []
-			)
+			// Parse secret and nullifier from generatedSecret
+			const [secretStr, nullifierStr] = generatedSecret.split(',')
+			const secret = BigInt(secretStr.trim())
+			const baseNullifier = BigInt(nullifierStr.trim())
+
+			// Compute commitment for THIS SPECIFIC SLOT: commitment(secret, nullifier + slotIndex)
+			const slotNullifier = baseNullifier + BigInt(slotIndex)
+			const secretSquared = secret * secret
+			const nullifierSquared = slotNullifier * slotNullifier
+			const commitment = secretSquared + nullifierSquared
 
 			tx.moveCall({
 				target: `${PACKAGE_ID}::random_poc::pick_slot`,
@@ -81,7 +88,7 @@ export const LotteryPlay: FC<LotteryPlayProps> = ({
 					tx.object(lotteryObjectId),
 					tx.object(RANDOM_OBJECT_ID),
 					coin,
-					tx.pure.vector("u8", secretHashBytes),
+					tx.pure.u64(commitment.toString()), // Pass slot-specific commitment
 				],
 			})
 
@@ -218,7 +225,14 @@ export const LotteryPlay: FC<LotteryPlayProps> = ({
 
 	const handleClaimPrizeWithSecret = async () => {
 		if (!lotteryObjectId || isLoading || !claimSecret) {
-			onStatusChange("Please provide the claim secret")
+			onStatusChange(
+				"Please provide the claim secret (format: secret,nullifier)"
+			)
+			return
+		}
+
+		if (!lotteryData || !lotteryData.winner) {
+			onStatusChange("No winner yet!")
 			return
 		}
 
@@ -226,18 +240,61 @@ export const LotteryPlay: FC<LotteryPlayProps> = ({
 		onStatusChange("Claiming prize anonymously...")
 
 		try {
-			const tx = new Transaction()
+			// Parse base secret and base nullifier from input (format: "secret,nullifier")
+			const [secretStr, nullifierStr] = claimSecret.split(",")
+			const secret = BigInt(secretStr.trim())
+			const baseNullifier = BigInt(nullifierStr.trim())
 
-			// Convert secret string to byte array
-			const secretBytes = Array.from(
-				claimSecret
-					.match(/.{1,2}/g)
-					?.map((byte) => parseInt(byte, 16)) || []
+			// Get the winning slot
+			const winningSlot = BigInt(lotteryData.winningSlot)
+
+			// Compute commitment for the WINNING SLOT: commitment(secret, baseNullifier + winningSlot)
+			const slotNullifier = baseNullifier + winningSlot
+			const secretSquared = secret * secret
+			const nullifierSquared = slotNullifier * slotNullifier
+			const commitment = secretSquared + nullifierSquared
+
+			// Compute nullifier_hash = (baseNullifier + winningSlot)^2
+			const nullifierHash = nullifierSquared
+
+			// Generate ZK proof
+			onStatusChange("Generating zero-knowledge proof...")
+			console.log("Generating proof with inputs:", {
+				secret: secret.toString(),
+				nullifier: slotNullifier.toString(),
+				commitment: commitment.toString(),
+				nullifierHash: nullifierHash.toString(),
+			})
+
+			const { proof_a, proof_b, proof_c } = await generateClaimProof(
+				secret,
+				slotNullifier,
+				commitment,
+				nullifierHash
 			)
 
+			console.log("Proof components generated:");
+			console.log("  proof_a length:", proof_a.length);
+			console.log("  proof_b length:", proof_b.length);
+			console.log("  proof_c length:", proof_c.length);
+			console.log("  proof_a (first 16 bytes):", proof_a.slice(0, 16));
+			console.log("  commitment:", commitment.toString());
+			console.log("  nullifierHash:", nullifierHash.toString());
+
+			onStatusChange("Proof generated, submitting transaction...")
+
+			const tx = new Transaction()
+
 			tx.moveCall({
-				target: `${PACKAGE_ID}::random_poc::claim_prize_with_secret`,
-				arguments: [tx.object(lotteryObjectId), tx.pure.vector("u8", secretBytes)],
+				target: `${PACKAGE_ID}::random_poc::claim_prize_with_proof`,
+				arguments: [
+					tx.object(lotteryObjectId),
+					tx.pure.vector("u8", proof_a),
+					tx.pure.vector("u8", proof_b),
+					tx.pure.vector("u8", proof_c),
+					tx.pure.u64(commitment.toString()),
+					tx.pure.u64(nullifierHash.toString()),
+				],
 			})
 
 			signAndExecute(
@@ -297,13 +354,16 @@ export const LotteryPlay: FC<LotteryPlayProps> = ({
 								)}
 							</div>
 							<div>
-								<span className="font-semibold">Fees Collected:</span>{" "}
+								<span className="font-semibold">
+									Fees Collected:
+								</span>{" "}
 								{mistToSui(lotteryData.remainingFee)} SUI
-								{lotteryData.remainingFee === 0 && lotteryData.winner && (
-									<span className="ml-2 text-xs text-gray-500 dark:text-gray-400">
-										(Collected ✓)
-									</span>
-								)}
+								{lotteryData.remainingFee === 0 &&
+									lotteryData.winner && (
+										<span className="ml-2 text-xs text-gray-500 dark:text-gray-400">
+											(Collected ✓)
+										</span>
+									)}
 							</div>
 							<div className="col-span-2">
 								<span className="font-semibold">Status:</span>{" "}
@@ -373,7 +433,9 @@ export const LotteryPlay: FC<LotteryPlayProps> = ({
 						{isLoading
 							? "Processing..."
 							: canCollectFee
-							? `Collect Fee (${mistToSui(lotteryData!.remainingFee)} SUI)`
+							? `Collect Fee (${mistToSui(
+									lotteryData!.remainingFee
+							  )} SUI)`
 							: isCreator &&
 							  lotteryData?.remainingFee === 0 &&
 							  lotteryData?.winner
@@ -405,7 +467,9 @@ export const LotteryPlay: FC<LotteryPlayProps> = ({
 
 				{/* Anonymous Claim Section */}
 				<div className="border-t dark:border-gray-700 pt-4 mt-4">
-					<h4 className="text-lg font-semibold mb-3">Anonymous Prize Claim</h4>
+					<h4 className="text-lg font-semibold mb-3">
+						Anonymous Prize Claim
+					</h4>
 					<p className="text-xs text-gray-600 dark:text-gray-400 mb-3">
 						If you have the claim secret, you can collect the prize
 						anonymously from any wallet.
@@ -421,7 +485,9 @@ export const LotteryPlay: FC<LotteryPlayProps> = ({
 						<button
 							onClick={handleClaimPrizeWithSecret}
 							disabled={
-								isLoading || !claimSecret || lotteryData?.prizeClaimed
+								isLoading ||
+								!claimSecret ||
+								lotteryData?.prizeClaimed
 							}
 							className="px-6 py-2 bg-orange-600 text-white rounded-md hover:bg-orange-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors font-medium"
 							title={
