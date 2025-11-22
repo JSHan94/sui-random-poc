@@ -2,12 +2,6 @@ import { FC } from "react"
 import { useSignAndExecuteTransaction } from "@mysten/dapp-kit"
 import { Transaction } from "@mysten/sui/transactions"
 import { PACKAGE_ID, LOTTERY_PRIZE, mistToSui } from "../../../config/constants"
-import {
-	VK_GAMMA_ABC_G1,
-	VK_ALPHA_G1_BETA_G2,
-	VK_GAMMA_G2_NEG_PC,
-	VK_DELTA_G2_NEG_PC,
-} from "../../../config/verificationKeys"
 
 interface LotteryCreationProps {
 	isLoading: boolean
@@ -35,17 +29,9 @@ export const LotteryCreation: FC<LotteryCreationProps> = ({
 
 			const [coin] = tx.splitCoins(tx.gas, [LOTTERY_PRIZE])
 
-			// Real Groth16 verification keys for ZK proof verification
-			// Generated from circuits/claim_final.zkey
 			tx.moveCall({
 				target: `${PACKAGE_ID}::random_poc::create_lottery`,
-				arguments: [
-					coin,
-					tx.pure.vector('u8', VK_GAMMA_ABC_G1),
-					tx.pure.vector('u8', VK_ALPHA_G1_BETA_G2),
-					tx.pure.vector('u8', VK_GAMMA_G2_NEG_PC),
-					tx.pure.vector('u8', VK_DELTA_G2_NEG_PC),
-				],
+				arguments: [coin],
 			})
 
 			signAndExecute(
@@ -81,8 +67,7 @@ export const LotteryCreation: FC<LotteryCreationProps> = ({
 			<h3 className="text-xl font-semibold mb-4">Create New Lottery</h3>
 			<p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
 				Create a 3x3 lottery with 9 slots. Players pay {mistToSui(15_000_000)}{" "}
-				SUI per pick. Winner gets {mistToSui(LOTTERY_PRIZE)} SUI! Includes
-				Groth16 verification keys for anonymous prize claiming with ZK proofs.
+				SUI per pick. Winner gets {mistToSui(LOTTERY_PRIZE)} SUI!
 			</p>
 			<button
 				onClick={handleCreateLottery}
